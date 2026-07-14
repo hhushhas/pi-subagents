@@ -5,7 +5,8 @@ import { pathToFileURL } from "node:url";
 import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
-import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest } from "./control-channel.ts";
+import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest, type WorkflowControlRequest } from "./control-channel.ts";
+import { publishLaunchReady, waitForLaunchRelease } from "./launch-operations.ts";
 import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
 import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
@@ -93,6 +94,7 @@ import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
+import type { AsyncSessionIdentity, ControlRecord, NotificationMode, RuntimeLaunchContext, TerminalRecord } from "../../shared/runtime-protocol.ts";
 
 interface SubagentRunConfig {
 	id: string;
@@ -128,6 +130,9 @@ interface SubagentRunConfig {
 	toolBudget?: ResolvedToolBudget;
 	/** Global cap on simultaneously-running subagent tasks within this run. */
 	globalConcurrencyLimit?: number;
+	runtimeLaunch?: RuntimeLaunchContext;
+	sessionIdentity?: AsyncSessionIdentity;
+	notificationMode?: NotificationMode;
 }
 
 interface StepResult {
@@ -1417,7 +1422,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		runId: id,
 		...(config.sessionId ? { sessionId: config.sessionId } : {}),
 		mode: config.resultMode ?? (flatSteps.length > 1 ? "chain" : "single"),
-		state: "running",
+		state: config.runtimeLaunch ? "queued" : "running",
 		lastActivityAt: overallStartTime,
 		startedAt: overallStartTime,
 		lastUpdate: overallStartTime,
@@ -1435,10 +1440,22 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		artifactsDir,
 		sessionDir: config.sessionDir,
 		outputFile: path.join(asyncDir, "output-0.log"),
+		...(config.runtimeLaunch ? { runtimeLaunch: config.runtimeLaunch } : {}),
+		...(config.sessionIdentity ? { sessionIdentity: config.sessionIdentity } : {}),
+		...(config.notificationMode ? { notificationMode: config.notificationMode } : {}),
+		controls: [],
 	};
 
 	fs.mkdirSync(asyncDir, { recursive: true });
 	writeAtomicJson(statusPath, statusPayload);
+	if (config.runtimeLaunch) {
+		publishLaunchReady(asyncDir, config.runtimeLaunch.operationId, id);
+		const released = await waitForLaunchRelease(asyncDir, config.runtimeLaunch.operationId, id);
+		if (!released) throw new Error(`Workflow launch '${config.runtimeLaunch.operationId}' was not released before the safety barrier expired.`);
+		statusPayload.state = "running";
+		statusPayload.lastUpdate = Date.now();
+		writeAtomicJson(statusPath, statusPayload);
+	}
 	const emitNestedSelfEvent = (type: "subagent.nested.updated" | "subagent.nested.completed"): void => {
 		if (!config.nestedRoute || !config.nestedSelf) return;
 		try {
@@ -1794,6 +1811,12 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		if (!step) return;
 		step.model = model;
 		step.thinking = thinking;
+		if (flatIndex === 0 && statusPayload.runtimeLaunch) {
+			statusPayload.runtimeLaunch = {
+				...statusPayload.runtimeLaunch,
+				effectiveExecution: { ...statusPayload.runtimeLaunch.effectiveExecution, ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) },
+			};
+		}
 		statusPayload.lastUpdate = now;
 		writeStatusPayload();
 	};
@@ -1951,6 +1974,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				config: controlConfig,
 				startedAt: step.startedAt ?? overallStartTime,
 				lastActivityAt,
+				currentTool: step.currentTool,
 				now,
 			});
 			if (idleState === "needs_attention") {
@@ -1999,12 +2023,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		activityTimer.unref?.();
 	}
 
+	let workflowControl: WorkflowControlRequest | undefined;
 	const interruptRunner = () => {
 		consumeInterruptRequest(asyncDir);
 		if (interrupted || statusPayload.state !== "running") return;
 		interrupted = true;
 		const now = Date.now();
-		statusPayload.state = "paused";
+		statusPayload.state = workflowControl?.type === "stop" ? "stopping" : "pausing";
 		currentActivityState = undefined;
 		statusPayload.activityState = undefined;
 		statusPayload.lastUpdate = now;
@@ -2019,9 +2044,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		}
 		writeStatusPayload();
 		appendJsonl(eventsPath, JSON.stringify({
-			type: "subagent.run.paused",
+			type: workflowControl?.type === "stop" ? "subagent.run.stopping" : "subagent.run.pausing",
 			ts: now,
 			runId: id,
+			...(workflowControl ? { controlRequestId: workflowControl.controlRequestId } : {}),
 		}));
 		interruptNestedAsyncDescendants();
 		interruptActiveChildren();
@@ -2048,6 +2074,14 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			step.durationMs = step.startedAt ? now - step.startedAt : 0;
 			step.lastActivityAt = now;
 		}
+		const failTimedOutGraphNode = (node: NonNullable<RunnerStatusPayload["workflowGraph"]>["nodes"][number]): void => {
+			if (node.status === "running" || node.status === "pending") {
+				node.status = "failed";
+				node.error = message;
+			}
+			for (const child of node.children ?? []) failTimedOutGraphNode(child);
+		};
+		for (const node of statusPayload.workflowGraph?.nodes ?? []) failTimedOutGraphNode(node);
 		writeStatusPayload();
 		appendJsonl(eventsPath, JSON.stringify({
 			type: "subagent.run.timed_out",
@@ -2068,6 +2102,18 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const disposeControlInbox = watchAsyncControlInbox(asyncDir, {
 		onInterrupt: interruptRunner,
 		onTimeout: timeoutRunner,
+		onWorkflowControl: (request) => {
+			if (workflowControl || interrupted || statusPayload.state !== "running") return;
+			workflowControl = request;
+			const record: ControlRecord = {
+				controlRequestId: request.controlRequestId,
+				action: request.type,
+				requestedAt: request.ts,
+				acceptedAt: Date.now(),
+			};
+			statusPayload.controls = [...(statusPayload.controls ?? []), record];
+			interruptRunner();
+		},
 		onSteer: (request) => {
 			const targetStep = request.targetIndex !== undefined ? statusPayload.steps[request.targetIndex] : undefined;
 			if (targetStep?.status === "pending") pendingStepSteers.push(request);
@@ -3006,7 +3052,20 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	disposeControlInbox();
 	const effectiveSessionFile = sessionFile ?? latestSessionFile;
 	const runEndedAt = Date.now();
-	statusPayload.state = timedOut || turnBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed";
+	const interruptionTookEffect = interrupted && (
+		results.some((result) => result.interrupted === true)
+		|| statusPayload.steps.some((step) => step.status === "paused")
+	);
+	statusPayload.state = timedOut || turnBudgetExceeded ? "failed" : interruptionTookEffect ? workflowControl?.type === "stop" ? "stopped" : "paused" : results.every((r) => r.success) ? "complete" : "failed";
+	const terminal: TerminalRecord = {
+		reason: timedOut ? "timed_out" : turnBudgetExceeded ? "failed" : interruptionTookEffect ? workflowControl?.type === "stop" ? "stopped" : "paused" : results.every((r) => r.success) ? "completed" : "failed",
+		at: runEndedAt,
+		...(interruptionTookEffect && workflowControl ? { controlRequestId: workflowControl.controlRequestId } : {}),
+	};
+	statusPayload.terminal = terminal;
+	if (workflowControl && interruptionTookEffect) {
+		statusPayload.controls = (statusPayload.controls ?? []).map((control) => control.controlRequestId === workflowControl?.controlRequestId ? { ...control, confirmedAt: runEndedAt } : control);
+	}
 	statusPayload.activityState = undefined;
 	if (timedOut) {
 		statusPayload.timedOut = true;
@@ -3068,9 +3127,14 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			id,
 			agent: agentName,
 			mode: resultMode,
-			success: !timedOut && !turnBudgetExceeded && !interrupted && results.every((r) => r.success),
-			state: timedOut || turnBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed",
-			summary: timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? (statusPayload.error ?? "Subagent exceeded turn budget.") : interrupted ? "Paused after interrupt. Waiting for explicit next action." : summary,
+			success: !timedOut && !turnBudgetExceeded && !interruptionTookEffect && results.every((r) => r.success),
+			state: statusPayload.state,
+			terminal,
+			controls: statusPayload.controls,
+			...(statusPayload.runtimeLaunch ? { runtimeLaunch: statusPayload.runtimeLaunch } : {}),
+			...(config.sessionIdentity ? { sessionIdentity: config.sessionIdentity } : {}),
+			...(config.notificationMode ? { notificationMode: config.notificationMode } : {}),
+			summary: timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? (statusPayload.error ?? "Subagent exceeded turn budget.") : interruptionTookEffect ? workflowControl?.type === "stop" ? "Stopped by workflow control." : "Paused after interrupt. Waiting for explicit next action." : summary,
 			...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
 			...(config.deadlineAt !== undefined ? { deadlineAt: config.deadlineAt } : {}),
 			...(statusPayload.turnBudget ? { turnBudget: statusPayload.turnBudget } : {}),

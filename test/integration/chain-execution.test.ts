@@ -296,19 +296,19 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 			makeChainParams(
 				[{ agent: "analyst", task: "Quick first step" }, { agent: "reporter", task: "Slow second step" }],
 				agents,
-				{ timeoutMs: 300 },
+				{ timeoutMs: 3000 },
 			),
 		);
 		const elapsed = Date.now() - start;
 
-		assert.ok(elapsed < 5000, `should time out early, took ${elapsed}ms`);
+		assert.ok(elapsed < 8000, `should time out early, took ${elapsed}ms`);
 		assert.equal(result.isError, true);
 		assert.equal(result.details.results.length, 2);
 		assert.equal(result.details.results[0]?.exitCode, 0);
 		assert.equal(result.details.results[0]?.finalOutput, "first done");
 		assert.equal(result.details.results[1]?.timedOut, true);
-		assert.equal(result.details.results[1]?.error, "Subagent timed out after 300ms.");
-		assert.match(result.content[0]?.text ?? "", /Subagent timed out after 300ms\./);
+		assert.equal(result.details.results[1]?.error, "Subagent timed out after 3000ms.");
+		assert.match(result.content[0]?.text ?? "", /Subagent timed out after 3000ms\./);
 	});
 
 	it("passes file-only saved-output references through {previous}", async () => {

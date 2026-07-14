@@ -61,7 +61,21 @@ type ResultFileData = {
 	sessionFile?: string;
 	asyncDir?: string;
 	intercomTarget?: string;
+	notificationMode?: "default" | "event-only";
+	sessionIdentity?: { orchestratorSessionId?: string; orchestratorSessionFile?: string };
+	runtimeLaunch?: unknown;
+	terminal?: unknown;
+	totalTokens?: unknown;
+	totalCost?: unknown;
 };
+
+function belongsToCurrentSession(data: ResultFileData, state: SubagentState): boolean {
+	if (data.sessionIdentity?.orchestratorSessionId) {
+		return data.sessionIdentity.orchestratorSessionId === state.currentSessionId;
+	}
+	if (data.sessionId === state.currentSessionId) return true;
+	return Boolean(state.currentSessionFile && data.sessionId === state.currentSessionFile);
+}
 
 function sanitizeNestedResultChildren(value: unknown, resultPath: string, label: string): NestedRunSummary[] | undefined {
 	if (value === undefined) return undefined;
@@ -117,8 +131,12 @@ export function createResultWatcher(
 		const resultPath = path.join(resultsDir, file);
 		if (!fsApi.existsSync(resultPath)) return;
 		try {
-			const data = JSON.parse(fsApi.readFileSync(resultPath, "utf-8")) as ResultFileData;
-			if (typeof data.sessionId !== "string" || data.sessionId !== state.currentSessionId) return;
+			const parsed = JSON.parse(fsApi.readFileSync(resultPath, "utf-8")) as ResultFileData;
+			if (!belongsToCurrentSession(parsed, state)) return;
+			const data: ResultFileData = {
+				...parsed,
+				...(state.currentSessionId ? { sessionId: parsed.sessionIdentity?.orchestratorSessionId ?? state.currentSessionId } : {}),
+			};
 
 			const runId = data.runId ?? data.id ?? file.replace(/\.json$/i, "");
 			const hasExplicitNestedChildren = data.nestedChildren !== undefined;
@@ -170,7 +188,7 @@ export function createResultWatcher(
 				};
 			}), nestedChildren);
 
-			const intercomTarget = data.intercomTarget?.trim();
+			const intercomTarget = data.notificationMode === "event-only" ? undefined : data.intercomTarget?.trim();
 			if (intercomTarget) {
 				const mode = data.mode === "single" || data.mode === "parallel" || data.mode === "chain"
 					? data.mode
@@ -184,13 +202,30 @@ export function createResultWatcher(
 					asyncId: data.id,
 					asyncDir: data.asyncDir,
 				});
-				const delivered = await deliverSubagentResultIntercomEvent(pi.events, payload);
-				if (!delivered) {
-					console.error(`Subagent async grouped result intercom delivery was not acknowledged for '${resultPath}'.`);
-				}
+				// Compatibility intercom is best effort; the lifecycle event below is
+				// authoritative and some parents intentionally have no ack listener.
+				await deliverSubagentResultIntercomEvent(pi.events, payload);
 			}
 
-			pi.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			const eventData = data.notificationMode === "event-only" ? {
+				id: data.id,
+				runId,
+				agent: data.agent,
+				success: data.success,
+				state: data.state,
+				mode: data.mode,
+				timestamp: now,
+				cwd: data.cwd,
+				sessionId: data.sessionId,
+				sessionFile: data.sessionFile,
+				asyncDir: data.asyncDir,
+				notificationMode: data.notificationMode,
+				sessionIdentity: data.sessionIdentity,
+				runtimeLaunch: data.runtimeLaunch,
+				terminal: data.terminal,
+				totalTokens: data.totalTokens,
+				totalCost: data.totalCost,
+			} : {
 				...data,
 				runId,
 				...(nestedChildren?.length ? { nestedChildren } : {}),
@@ -208,7 +243,8 @@ export function createResultWatcher(
 						}))
 						: [],
 				} : {}),
-			});
+			};
+			pi.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, eventData);
 			fsApi.unlinkSync(resultPath);
 		} catch (error) {
 			if (isNotFoundError(error)) return;

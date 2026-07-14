@@ -56,6 +56,7 @@ describe("async stale-run reconciliation", () => {
 			assert.match(result.message ?? "", /process 12345 exited or disappeared/);
 			const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8"));
 			assert.equal(status.state, "failed");
+			assert.equal(status.terminal.reason, "process_lost");
 			assert.equal(status.sessionId, "session-current");
 			assert.equal(status.steps[0].status, "failed");
 			assert.match(status.steps[0].error, /process 12345 exited or disappeared/);
@@ -63,6 +64,7 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(resultJson.success, false);
 			assert.equal(resultJson.sessionId, "session-current");
 			assert.equal(resultJson.state, "failed");
+			assert.equal(resultJson.terminal.reason, "process_lost");
 			assert.equal(resultJson.exitCode, 1);
 			assert.match(resultJson.summary, /process 12345 exited or disappeared/);
 			assert.match(fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8"), /subagent\.run\.repaired_stale/);
@@ -191,7 +193,7 @@ describe("async stale-run reconciliation", () => {
 		}
 	});
 
-	it("fails a stale run when a live pid has not updated beyond the stale threshold", () => {
+	it("preserves a quiet run while its runner pid remains alive", () => {
 		const root = tempRoot("pi-stale-live-pid-");
 		try {
 			const asyncDir = path.join(root, "run-reused-pid");
@@ -213,9 +215,9 @@ describe("async stale-run reconciliation", () => {
 				staleAlivePidMs: 1000,
 			});
 
-			assert.equal(result.repaired, true);
-			assert.equal(result.status?.state, "failed");
-			assert.match(result.message ?? "", /live PID, but status has not updated/);
+			assert.equal(result.repaired, false);
+			assert.equal(result.status?.state, "running");
+			assert.equal(result.message, undefined);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

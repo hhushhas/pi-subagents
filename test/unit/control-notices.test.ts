@@ -71,6 +71,13 @@ describe("subagent control notice delivery", () => {
 		assert.deepEqual(recorder.sent[0]?.options, { triggerTurn: true });
 	});
 
+	it("does not wake the parent for event-only workflow attention", () => {
+		const state = makeState();
+		const recorder = makeRecorder();
+		handleSubagentControlNotice({ pi: recorder.pi, state, visibleControlNotices: new Set(), details: { source: "async", notificationMode: "event-only", event: needsAttentionEvent() } });
+		assert.equal(recorder.sent.length, 0);
+	});
+
 	it("queues foreground needs-attention notices until the same step is still actionable", async () => {
 		const state = makeState();
 		state.foregroundControls.set("run-1", {

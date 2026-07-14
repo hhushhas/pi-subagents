@@ -680,9 +680,9 @@ Additional user prompt templates can delegate into `pi-subagents` through the na
 
 ## Extension RPC
 
-Other Pi extensions can call `pi-subagents` through the in-process event bus. The stable v1 channels are `subagents:rpc:v1:ready`, `subagents:rpc:v1:request`, and per-request replies at `subagents:rpc:v1:reply:<requestId>`. Envelopes use `{ version: 1, requestId, method, params }`, and replies use `{ version: 1, requestId, success, data | error }`.
+Other Pi extensions can call `pi-subagents` through the in-process event bus. Workflow protocol v2 uses `subagents:rpc:v2:ready`, `subagents:rpc:v2:request`, and per-request replies at `subagents:rpc:v2:reply:<requestId>`. Envelopes use `{ version: 2, requestId, method, params }`, and replies use `{ version: 2, requestId, success, data | error }`. The stable v1 channels remain available with their original envelope and method semantics.
 
-Methods: `ping`, `status`, `spawn`, `interrupt`, and `stop`. `spawn` is async-only and rejects management actions, `async: false`, or `clarify: true`; it reuses the normal executor, so discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status are shared with the `subagent` tool. `status` and `interrupt` map to the normal control actions. `stop` targets running async runs through the existing timeout control channel. `pi.events` is process-local, so separate Pi processes and child subagents need lifecycle artifact files or `pi-intercom` instead.
+Protocol v2 methods are `ping`, `status`, `lookup`, `spawn`, `interrupt`, `stop`, `steer`, and `resume`. Workflow mutations require the capability/provenance contract; launch operations and control IDs are durable and replay-safe. Protocol v1 retains `ping`, `status`, `spawn`, `interrupt`, and `stop`. `pi.events` is process-local, so separate Pi processes and child subagents need lifecycle artifacts or the supervisor channel instead.
 
 ## Important Constraints
 

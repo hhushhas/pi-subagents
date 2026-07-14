@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- Added workflow RPC protocol v2 with capability-authorized `spawn`, `lookup`, `status`, `interrupt`, `stop`, `steer`, and context-preserving `resume` operations. Durable operation IDs and a ready/go launch barrier make replay safe after lost responses without creating duplicate children.
+- Added workflow identity and launch provenance to runtime artifacts, including immutable lease epochs, effective execution contracts, causal terminal reasons, control request IDs, and event-only completion notification mode.
+- Added live steering readiness and acknowledgement artifacts so workflow steering succeeds only after a child confirms delivery.
+
+### Fixed
+- Keep runtime session UUIDs distinct from JSONL session-file paths so result watching and controls address the same child correctly.
+- Preserve quiet live runs indefinitely while their runner PID remains alive; inactivity now produces attention telemetry without mutating lifecycle state.
+- Bound ordinary completion notifications to 2 KiB and suppress workflow-owned completion injection so a workflow emits only its own compact terminal notice.
+- Reconcile missing runner processes to an explicit `process_lost` terminal result and make pause/stop races report the terminal outcome that actually won.
+
 ## [0.34.0] - 2026-07-07
 
 ### Added

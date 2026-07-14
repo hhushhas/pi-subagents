@@ -15,6 +15,7 @@ import { clearPendingForegroundControlNotices } from "../../extension/control-no
 import { runSync } from "./execution.ts";
 import { resolveModelCandidate, resolveSubagentModelOverride } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
+import type { RuntimeLaunchContext } from "../../shared/runtime-protocol.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
 import { recordRun } from "../shared/run-history.ts";
 import {
@@ -208,6 +209,7 @@ interface ExecutionContextData {
 	configToolBudget?: ResolvedToolBudget;
 	contextPolicy: AgentDefaultContextPolicy;
 	modelScope?: ModelScopeConfig;
+	runtimeLaunch?: RuntimeLaunchContext;
 }
 
 function resolveRequestedCwd(runtimeCwd: string, requestedCwd: string | undefined): string {
@@ -961,6 +963,7 @@ async function resumeAsyncRun(input: {
 	requestCwd: string;
 	ctx: ExtensionContext;
 	deps: ExecutorDeps;
+	runtimeLaunch?: RuntimeLaunchContext;
 }): Promise<AgentToolResult<Details>> {
 	const followUp = (input.params.message ?? input.params.task ?? "").trim();
 	const attachChain = (input.params.chain?.length ?? 0) > 0 ? input.params.chain as ChainStep[] : undefined;
@@ -1147,7 +1150,7 @@ async function resumeAsyncRun(input: {
 		return { content: [{ type: "text", text: formatAsyncStartedMessage(lines.join("\n")) }], details: result.details };
 	}
 
-	const runId = randomUUID().slice(0, 8);
+	const runId = input.runtimeLaunch?.runId ?? randomUUID().slice(0, 8);
 	const artifactConfig: ArtifactConfig = { ...DEFAULT_ARTIFACT_CONFIG, enabled: input.params.artifacts !== false };
 	const artifactsDir = getArtifactsDir(parentSessionFile, effectiveCwd);
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
@@ -1163,6 +1166,7 @@ async function resumeAsyncRun(input: {
 			currentModelProvider: input.ctx.model?.provider,
 			currentModel: input.ctx.model,
 			modelScope,
+			runtimeLaunch: input.runtimeLaunch,
 		},
 		cwd: effectiveCwd,
 		maxOutput: input.params.maxOutput,
@@ -1180,6 +1184,8 @@ async function resumeAsyncRun(input: {
 		controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
 		childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
 		availableModels,
+		modelOverride: input.params.model,
+		thinkingOverride: input.runtimeLaunch?.effectiveExecution.thinking as AgentConfig["thinking"] | undefined,
 	});
 	if (result.isError) return result;
 
@@ -1805,7 +1811,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			details: { mode: "single" as const, results: [] },
 		};
 	}
-	const id = randomUUID();
+	const id = data.runtimeLaunch?.runId ?? randomUUID();
 	const asyncCtx = {
 		pi: deps.pi,
 		cwd: ctx.cwd,
@@ -1814,6 +1820,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		currentModelProvider: ctx.model?.provider,
 		currentModel: ctx.model,
 		modelScope: data.modelScope,
+		runtimeLaunch: data.runtimeLaunch,
 	};
 	const availableModels: ModelInfo[] = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
@@ -3091,12 +3098,13 @@ function omitExecutionModeActionAlias(params: SubagentParamsLike): SubagentParam
 }
 
 export function createSubagentExecutor(deps: ExecutorDeps): {
-	execute: (
+		execute: (
 		id: string,
 		params: SubagentParamsLike,
 		signal: AbortSignal,
 		onUpdate: ((r: AgentToolResult<Details>) => void) | undefined,
 		ctx: ExtensionContext,
+		runtimeLaunch?: RuntimeLaunchContext,
 	) => Promise<AgentToolResult<Details>>;
 } {
 	const execute = async (
@@ -3105,6 +3113,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		signal: AbortSignal,
 		onUpdate: ((r: AgentToolResult<Details>) => void) | undefined,
 		ctx: ExtensionContext,
+		runtimeLaunch?: RuntimeLaunchContext,
 	): Promise<AgentToolResult<Details>> => {
 		deps.state.baseCwd = ctx.cwd;
 		deps.state.foregroundRuns ??= new Map();
@@ -3189,7 +3198,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				return inspectSubagentStatus(paramsWithResolvedCwd, { state: deps.state, nested: nestedScope, sessionRoots });
 			}
 			if (action === "resume") {
-				return resumeAsyncRun({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });
+				return resumeAsyncRun({ params: paramsWithResolvedCwd, requestCwd, ctx, deps, runtimeLaunch });
 			}
 			if (action === "steer") {
 				const message = (paramsWithResolvedCwd.message ?? paramsWithResolvedCwd.task ?? "").trim();
@@ -3412,8 +3421,12 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			path.join(sessionRoot, `run-${idx ?? 0}`);
 		const forkSessionFileForTask = (agentName: string, idx?: number) =>
 			shouldForkAgent(contextPolicy, agentName) ? forkSessionFileForIndex(idx) : undefined;
-		const forkThinkingOverrideForTask = (agentName: string, idx?: number) =>
-			shouldForkAgent(contextPolicy, agentName) ? forkThinkingOverrideForIndex(idx) : undefined;
+		const forkThinkingOverrideForTask = (agentName: string, idx?: number) => {
+			if (runtimeLaunch && (idx ?? 0) === 0 && agentName === runtimeLaunch.effectiveExecution.agent) {
+				return runtimeLaunch.effectiveExecution.thinking as AgentConfig["thinking"] | undefined;
+			}
+			return shouldForkAgent(contextPolicy, agentName) ? forkThinkingOverrideForIndex(idx) : undefined;
+		};
 		const childSessionFileForTask = (agentName: string, idx?: number) =>
 			forkSessionFileForTask(agentName, idx) ?? path.join(sessionDirForIndex(idx), "session.jsonl");
 		const childSessionFileForIndex = (idx?: number) =>
@@ -3467,6 +3480,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			configToolBudget: configToolBudget.toolBudget,
 			contextPolicy,
 			modelScope,
+			runtimeLaunch,
 		};
 
 		const foregroundControl = effectiveAsync
@@ -3597,13 +3611,14 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		signal: AbortSignal,
 		onUpdate: ((r: AgentToolResult<Details>) => void) | undefined,
 		ctx: ExtensionContext,
+		runtimeLaunch?: RuntimeLaunchContext,
 	): Promise<AgentToolResult<Details>> => {
 		const requestParams = omitExecutionModeActionAlias(params);
-		if (requestParams.action) return execute(id, requestParams, signal, onUpdate, ctx);
+		if (requestParams.action) return execute(id, requestParams, signal, onUpdate, ctx, runtimeLaunch);
 		if (deps.state.subagentInProgress === true) return duplicateSubagentCallResult(requestParams);
 		deps.state.subagentInProgress = true;
 		try {
-			return await execute(id, requestParams, signal, onUpdate, ctx);
+			return await execute(id, requestParams, signal, onUpdate, ctx, runtimeLaunch);
 		} finally {
 			deps.state.subagentInProgress = false;
 		}

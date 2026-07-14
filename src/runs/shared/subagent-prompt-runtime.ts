@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerNativeSupervisorClient } from "../../intercom/native-supervisor-channel.ts";
-import { consumeSteerRequestsFromDir, writeSteerRequestToDir, type SteerRequest } from "../background/control-channel.ts";
+import { acknowledgeSteer, clearSteerReady, consumeSteerRequestsFromDir, markSteerReady, writeSteerRequestToDir, type SteerRequest } from "../background/control-channel.ts";
 import { SUBAGENT_FANOUT_CHILD_ENV, SUBAGENT_STEER_INBOX_ENV } from "./pi-args.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV, validateStructuredOutputValue } from "./structured-output.ts";
 import { TOOL_BUDGET_ENV, decodeToolBudgetEnv, shouldBlockToolForBudget, toolBudgetBlockedMessage, toolBudgetSoftNudge } from "./tool-budget.ts";
@@ -211,6 +211,7 @@ function registerSteeringInbox(pi: ExtensionAPI): void {
 				const request = requests[index]!;
 				try {
 					sendUserMessage(formatSteerMessage(request), { deliverAs: "steer" });
+					acknowledgeSteer(steerInbox, request);
 				} catch {
 					for (const pending of requests.slice(index)) writeSteerRequestToDir(steerInbox, pending);
 					break;
@@ -240,6 +241,7 @@ function registerSteeringInbox(pi: ExtensionAPI): void {
 	const activate = (): undefined => {
 		start();
 		canSteer = true;
+		markSteerReady(steerInbox);
 		flush();
 		return undefined;
 	};
@@ -251,6 +253,7 @@ function registerSteeringInbox(pi: ExtensionAPI): void {
 	}
 	onRuntimeEvent("session_shutdown", () => {
 		disposed = true;
+		clearSteerReady(steerInbox);
 		try {
 			watcher?.close();
 		} catch {}

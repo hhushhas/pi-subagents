@@ -54,8 +54,27 @@ export interface SteerRequest {
 	source?: string;
 }
 
+export interface WorkflowControlRequest {
+	type: "pause" | "stop";
+	controlRequestId: string;
+	ts: number;
+	source?: string;
+}
+
 const STEER_REQUESTS_DIR = "steer-requests";
 const STEER_TARGETS_DIR = "steer-targets";
+const STEER_ACKS_DIR = ".acks";
+const STEER_READY_FILE = ".ready";
+const STEER_OPERATIONS_DIR = "steer-operations";
+const WORKFLOW_REQUESTS_DIR = "workflow-requests";
+
+export interface SteerAcknowledgement {
+	version: 1;
+	requestId: string;
+	acceptedAt: number;
+	message: string;
+	targetIndex?: number;
+}
 
 /** Control inbox directory inside an async run dir. */
 export function controlInboxDir(asyncDir: string): string {
@@ -82,8 +101,146 @@ export function stepSteerInboxDir(asyncDir: string, index: number): string {
 	return path.join(controlInboxDir(asyncDir), STEER_TARGETS_DIR, String(index));
 }
 
+export function steerReadyPath(inboxDir: string): string {
+	return path.join(inboxDir, STEER_READY_FILE);
+}
+
+export function steerAckPath(inboxDir: string, requestId: string): string {
+	const key = Buffer.from(requestId).toString("base64url");
+	return path.join(inboxDir, STEER_ACKS_DIR, `${key}.json`);
+}
+
+export function markSteerReady(inboxDir: string, now = Date.now()): void {
+	writeAtomicJson(steerReadyPath(inboxDir), { version: 1, pid: process.pid, readyAt: now });
+}
+
+export function clearSteerReady(inboxDir: string): void {
+	try { fs.rmSync(steerReadyPath(inboxDir), { force: true }); } catch { /* best effort on shutdown */ }
+}
+
+export function isSteerReady(inboxDir: string): boolean {
+	try {
+		const ready = JSON.parse(fs.readFileSync(steerReadyPath(inboxDir), "utf-8")) as { version?: number; pid?: number };
+		return ready.version === 1 && typeof ready.pid === "number";
+	} catch {
+		return false;
+	}
+}
+
+export function acknowledgeSteer(inboxDir: string, request: SteerRequest, now = Date.now()): void {
+	writeAtomicJson(steerAckPath(inboxDir, request.id), {
+		version: 1,
+		requestId: request.id,
+		acceptedAt: now,
+		message: request.message,
+		...(request.targetIndex !== undefined ? { targetIndex: request.targetIndex } : {}),
+	} satisfies SteerAcknowledgement);
+}
+
+export function readSteerAck(inboxDir: string, requestId: string): SteerAcknowledgement | undefined {
+	try {
+		const value = JSON.parse(fs.readFileSync(steerAckPath(inboxDir, requestId), "utf-8")) as Partial<SteerAcknowledgement>;
+		if (value.version !== 1 || value.requestId !== requestId || typeof value.acceptedAt !== "number" || typeof value.message !== "string") return undefined;
+		if (value.targetIndex !== undefined && (!Number.isInteger(value.targetIndex) || value.targetIndex < 0)) return undefined;
+		return value as SteerAcknowledgement;
+	} catch {
+		return undefined;
+	}
+}
+
+export async function waitForSteerAck(inboxDir: string, requestId: string, timeoutMs = 1500): Promise<boolean> {
+	const file = steerAckPath(inboxDir, requestId);
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (fs.existsSync(file)) return true;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	return fs.existsSync(file);
+}
+
+export function workflowControlRequestsDir(asyncDir: string): string {
+	return path.join(controlInboxDir(asyncDir), WORKFLOW_REQUESTS_DIR);
+}
+
+export function requestWorkflowControl(asyncDir: string, request: WorkflowControlRequest): string {
+	if (!request.controlRequestId.trim() || /[/\\\r\n]/.test(request.controlRequestId)) throw new Error("controlRequestId is invalid.");
+	const file = path.join(workflowControlRequestsDir(asyncDir), `${Buffer.from(request.controlRequestId).toString("base64url")}.json`);
+	if (fs.existsSync(file)) {
+		const existing = JSON.parse(fs.readFileSync(file, "utf-8")) as WorkflowControlRequest;
+		if (existing.type !== request.type) throw new Error(`Control '${request.controlRequestId}' was already requested with a different action.`);
+		return file;
+	}
+	writeAtomicJson(file, request);
+	return file;
+}
+
+export function consumeWorkflowControlRequests(
+	asyncDir: string,
+	fsImpl: Pick<typeof fs, "existsSync" | "rmSync" | "readdirSync" | "readFileSync"> = fs,
+): WorkflowControlRequest[] {
+	const dir = workflowControlRequestsDir(asyncDir);
+	if (!fsImpl.existsSync(dir)) return [];
+	const output: WorkflowControlRequest[] = [];
+	for (const entry of fsImpl.readdirSync(dir).filter((name) => name.endsWith(".json")).sort()) {
+		const file = path.join(dir, entry);
+		try {
+			const value = JSON.parse(fsImpl.readFileSync(file, "utf-8")) as WorkflowControlRequest;
+			fsImpl.rmSync(file, { force: true });
+			if ((value.type === "pause" || value.type === "stop") && typeof value.controlRequestId === "string" && Number.isFinite(value.ts)) output.push(value);
+		} catch {
+			try { fsImpl.rmSync(file, { force: true }); } catch { /* concurrent consumer */ }
+		}
+	}
+	return output;
+}
+
+export function deliverWorkflowControl(input: {
+	asyncDir: string;
+	action: "pause" | "stop";
+	controlRequestId: string;
+	pid?: number;
+	kill?: KillFn;
+	now?: () => number;
+	source?: string;
+}): void {
+	requestWorkflowControl(input.asyncDir, {
+		type: input.action,
+		controlRequestId: input.controlRequestId,
+		ts: input.now?.() ?? Date.now(),
+		...(input.source ? { source: input.source } : {}),
+	});
+	// The file is authoritative. Do not signal here: a signal can race ahead of
+	// the request file and lose the causal controlRequestId.
+}
+
 function steerRequestFileName(request: SteerRequest): string {
 	return `${String(request.ts).padStart(13, "0")}-${Buffer.from(request.id).toString("base64url")}.json`;
+}
+
+function steerOperationPath(asyncDir: string, requestId: string): string {
+	return path.join(controlInboxDir(asyncDir), STEER_OPERATIONS_DIR, `${Buffer.from(requestId).toString("base64url")}.json`);
+}
+
+function reserveSteerOperation(asyncDir: string, request: SteerRequest): { created: boolean; path: string } {
+	const file = steerOperationPath(asyncDir, request.id);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	try {
+		const fd = fs.openSync(file, "wx", 0o600);
+		try {
+			fs.writeFileSync(fd, JSON.stringify(request, null, 2), "utf-8");
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		return { created: true, path: file };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		const existing = parseSteerRequest(JSON.parse(fs.readFileSync(file, "utf-8")));
+		if (!existing || existing.message !== request.message || existing.targetIndex !== request.targetIndex) {
+			throw new Error(`steer request '${request.id}' was already reserved with different guidance.`);
+		}
+		return { created: false, path: file };
+	}
 }
 
 export function writeSteerRequestToDir(dir: string, request: SteerRequest): string {
@@ -136,6 +293,8 @@ export function requestAsyncSteer(
 		...(payload.targetIndex !== undefined ? { targetIndex: payload.targetIndex } : {}),
 		...(payload.source ? { source: payload.source } : {}),
 	};
+	const reservation = reserveSteerOperation(asyncDir, request);
+	if (!reservation.created) return reservation.path;
 	return writeSteerRequestToDir(steerRequestsDir(asyncDir), request);
 }
 
@@ -277,6 +436,7 @@ export function watchAsyncControlInbox(
 		onInterrupt: () => void;
 		onTimeout?: () => void;
 		onSteer?: (request: SteerRequest) => void;
+		onWorkflowControl?: (request: WorkflowControlRequest) => void;
 		pollIntervalMs?: number;
 		fs?: ControlChannelFs;
 		timers?: ControlChannelTimers;
@@ -295,6 +455,7 @@ export function watchAsyncControlInbox(
 	const check = (): void => {
 		if (disposed) return;
 		try {
+			for (const request of consumeWorkflowControlRequests(asyncDir, fsImpl)) opts.onWorkflowControl?.(request);
 			if (consumeTimeoutRequest(asyncDir, fsImpl)) opts.onTimeout?.();
 			if (consumeInterruptRequest(asyncDir, fsImpl)) opts.onInterrupt();
 			for (const request of consumeSteerRequests(asyncDir, fsImpl)) opts.onSteer?.(request);

@@ -50,6 +50,16 @@ Installing the extension does not start an automatic reviewer in the background.
 When you finish implementing, run a reviewer subagent before summarizing.
 ```
 
+## Workflow RPC reliability
+
+This fork exposes protocol v2 for dependency-aware workflow extensions. Workflow launches carry an idempotent operation ID, capability-backed provenance, an immutable lease epoch, and a complete effective execution contract. A durable ready/go barrier prevents a child from beginning before its launch record can be recovered, so retrying `spawn` or `resume` after a lost reply finds the same run instead of creating another one.
+
+Pause and stop requests are accepted only for a matching authoritative workflow attempt and are confirmed by a terminal artifact carrying the same control request ID. Resume creates one replacement run from a causally paused session and preserves its agent, model, thinking level, working directory, timeout, notification mode, capability, and lineage. Steering requires a live child readiness marker and acknowledgement.
+
+Workflow-owned runs use `notificationMode: "event-only"`: their completion updates the scheduler without injecting report bodies into the parent. Ordinary background runs keep their existing notifications, capped at 2 KiB. Quiet live PIDs are never failed for inactivity alone; attention remains observational.
+
+Protocol v2 is an extension boundary, not a general model-facing tool surface. Callers should verify `ping` capabilities before using it and treat legacy runs without workflow identity as observation-only.
+
 ## Good first prompts
 
 These cover most day-to-day use:
@@ -201,25 +211,25 @@ Show me the current async runs.
 
 Async runs also write machine-readable lifecycle artifacts for observability and workflow gates. For a top-level async run, `details.asyncDir` points at a directory containing `status.json`, `events.jsonl`, `output-<index>.log`, and `subagent-log-<runId>.md`; the final summary is written to Pi's subagent results directory as `<runId>.json`. Nested async runs use the same shape under the nested async root and are discoverable through status projections that read the nested-run registry. These files are append/update artifacts only; interactive foreground behavior is unchanged.
 
-The stable v1 status/result fields are `lifecycleArtifactVersion`, `runId`/`id`, `sessionId`, `mode`, `state`, `startedAt`, `lastUpdate`, `endedAt`, `durationMs`, `cwd`, `asyncDir`, `sessionFile`, `outputFile`, `workflowGraph`, `steps`, `results`, `totalTokens`, `totalCost`, `model`/`attemptedModels`/`modelAttempts`, `toolCount`, `turnCount`, and nested `children` when a child is allowed to launch subagents. `events.jsonl` records lifecycle transitions such as `subagent.run.started`, `subagent.step.started`, `subagent.step.completed`/`failed`/`paused`, control attention events, nested interrupt failures, and `subagent.run.completed`; run boundary events include the lifecycle artifact version. Consumers should read these JSON files instead of scraping terminal output; unknown fields and event types should be ignored for forward compatibility.
+Lifecycle v2 keeps the established status/result fields and adds UUID/file session identity, workflow launch provenance, causal controls, terminal reasons, notification mode, and the resolved execution contract. Legacy v1 artifacts remain readable but are observation-only for workflow control. `events.jsonl` records lifecycle transitions such as `subagent.run.started`, `subagent.step.started`, `subagent.step.completed`/`failed`/`paused`, control attention events, nested interrupt failures, and `subagent.run.completed`; run boundary events include the lifecycle artifact version. Consumers should read these JSON files instead of scraping terminal output and ignore unknown fields or event types.
 
-Other Pi extensions can use the versioned in-process event-bus RPC instead of scraping slash output or calling internal modules. Listen for `subagents:rpc:v1:ready`, send requests on `subagents:rpc:v1:request`, and read replies from `subagents:rpc:v1:reply:<requestId>`.
+Other Pi extensions can use the versioned in-process event-bus RPC instead of scraping slash output or calling internal modules. Protocol v2 uses `subagents:rpc:v2:ready`, `subagents:rpc:v2:request`, and `subagents:rpc:v2:reply:<requestId>`. The published v1 channels and envelope semantics remain available for existing integrations.
 
 ```typescript
 const requestId = crypto.randomUUID();
-pi.events.on(`subagents:rpc:v1:reply:${requestId}`, (reply) => {
-  // { version: 1, requestId, success: true, data } or
-  // { version: 1, requestId, success: false, error: { code, message } }
+pi.events.on(`subagents:rpc:v2:reply:${requestId}`, (reply) => {
+  // { version: 2, requestId, success: true, data } or
+  // { version: 2, requestId, success: false, error: { code, message } }
 });
-pi.events.emit("subagents:rpc:v1:request", {
-  version: 1,
+pi.events.emit("subagents:rpc:v2:request", {
+  version: 2,
   requestId,
   method: "spawn",
   params: { agent: "reviewer", task: "Review the current diff", context: "fresh" }
 });
 ```
 
-The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, omit `clarify` or set `clarify: false`, and do not pass management `action` values. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status all behave the same. `stop` targets running async runs through the existing timeout control channel.
+Protocol v2 methods are `ping`, `status`, `lookup`, `spawn`, `interrupt`, `stop`, `steer`, and `resume`. Workflow mutations require capability and provenance fields; spawn/resume operations and steer/control request IDs are replay-safe. Protocol v1 retains `ping`, `status`, `spawn`, `interrupt`, and `stop` with their original behavior.
 
 `pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the file lifecycle artifacts or `pi-intercom` for cross-process coordination.
 

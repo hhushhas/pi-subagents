@@ -5,7 +5,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { formatDuration, shortenPath } from "../../shared/formatters.ts";
-import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
+import { resolveCurrentSessionId, resolveCurrentSessionIdentity } from "../../shared/session-identity.ts";
 import {
 	TEMP_ROOT_DIR,
 	type Details,
@@ -70,6 +70,19 @@ export function scheduledRunsEnabled(config: ExtensionConfig): boolean {
 export function scheduledRunStorePath(cwd: string, sessionId: string, root = SCHEDULED_RUNS_DIR): string {
 	const digest = createHash("sha256").update(`${path.resolve(cwd)}\0${sessionId}`).digest("hex").slice(0, 20);
 	return path.join(root, `${digest}.json`);
+}
+
+function migrateLegacyScheduledRunStore(cwd: string, sessionId: string, sessionFile: string | undefined, root: string): string {
+	const currentPath = scheduledRunStorePath(cwd, sessionId, root);
+	if (!sessionFile || fs.existsSync(currentPath)) return currentPath;
+	const legacyPath = scheduledRunStorePath(cwd, sessionFile, root);
+	if (legacyPath === currentPath || !fs.existsSync(legacyPath)) return currentPath;
+	const legacy = readStoreData(legacyPath, cwd, sessionFile);
+	legacy.sessionId = sessionId;
+	legacy.jobs = legacy.jobs.map((job) => ({ ...job, sessionId }));
+	writeAtomicJson(currentPath, legacy);
+	fs.rmSync(legacyPath, { force: true });
+	return currentPath;
 }
 
 export function parseScheduledRunTime(schedule: string, now = Date.now()): number {
@@ -270,8 +283,10 @@ export class ScheduledRunManager {
 			this.store = undefined;
 			return;
 		}
-		const sessionId = resolveCurrentSessionId(ctx.sessionManager);
-		this.store = new ScheduledRunStore(scheduledRunStorePath(ctx.cwd, sessionId, this.storeRoot), ctx.cwd, sessionId);
+		const identity = resolveCurrentSessionIdentity(ctx.sessionManager);
+		const sessionId = identity.orchestratorSessionId;
+		const storePath = migrateLegacyScheduledRunStore(ctx.cwd, sessionId, identity.orchestratorSessionFile, this.storeRoot);
+		this.store = new ScheduledRunStore(storePath, ctx.cwd, sessionId);
 		this.rearmScheduledJobs();
 	}
 

@@ -193,7 +193,7 @@ describe("registered subagent tool description", () => {
 		const output = execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",

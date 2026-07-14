@@ -201,6 +201,30 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 		assert.match(list.content[0]!.text, /nightly review/);
 	});
 
+	it("migrates pending jobs keyed by the former session-file identity", async () => {
+		const harness = freshHarness();
+		const sessionFile = harness.ctx.sessionManager.getSessionFile()!;
+		const sessionId = harness.ctx.sessionManager.getSessionId();
+		const legacyPath = scheduledRunStorePath(harness.ctx.cwd, sessionFile, harness.storeRoot);
+		const currentPath = scheduledRunStorePath(harness.ctx.cwd, sessionId, harness.storeRoot);
+		fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+		fs.writeFileSync(legacyPath, JSON.stringify({
+			version: 1,
+			cwd: harness.ctx.cwd,
+			sessionId: sessionFile,
+			jobs: [{ id: "legacy-job", name: "legacy pending", schedule: "+10m", runAt: harness.clock.now + 600_000, state: "scheduled", createdAt: harness.clock.now, updatedAt: harness.clock.now, cwd: harness.ctx.cwd, sessionId: sessionFile, params: { agent: "scout", task: "review", async: true, context: "fresh" } }],
+		}), "utf-8");
+
+		harness.manager.bindSession(harness.ctx);
+		const list = await harness.manager.handleToolCall({ action: "schedule-list" }, harness.ctx);
+		assert.match(list.content[0]!.text, /legacy pending/);
+		assert.equal(fs.existsSync(legacyPath), false);
+		const migrated = JSON.parse(fs.readFileSync(currentPath, "utf-8"));
+		assert.equal(migrated.sessionId, sessionId);
+		assert.equal(migrated.jobs[0].sessionId, sessionId);
+		assert.equal(harness.timers.pendingCount(), 1);
+	});
+
 	it("requires exactly one execution mode", async () => {
 		const harness = freshHarness();
 		// tasks + chain is genuinely ambiguous (both are execution arrays)
@@ -275,7 +299,7 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 
 	it("reports malformed persisted job records instead of dropping them", async () => {
 		const harness = freshHarness();
-		const sessionId = harness.ctx.sessionManager.getSessionFile()!;
+		const sessionId = harness.ctx.sessionManager.getSessionId();
 		const storePath = scheduledRunStorePath(harness.ctx.cwd, sessionId, harness.storeRoot);
 		fs.mkdirSync(path.dirname(storePath), { recursive: true });
 		fs.writeFileSync(storePath, JSON.stringify({ version: 1, cwd: harness.ctx.cwd, sessionId, jobs: [{ id: "bad" }] }), "utf-8");
@@ -286,7 +310,7 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 
 	it("reports JSON parse errors from a corrupted persisted store", async () => {
 		const harness = freshHarness();
-		const sessionId = harness.ctx.sessionManager.getSessionFile()!;
+		const sessionId = harness.ctx.sessionManager.getSessionId();
 		const storePath = scheduledRunStorePath(harness.ctx.cwd, sessionId, harness.storeRoot);
 		fs.mkdirSync(path.dirname(storePath), { recursive: true });
 		fs.writeFileSync(storePath, "{ not-json", "utf-8");

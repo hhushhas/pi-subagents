@@ -70,6 +70,29 @@ describe("result watcher", () => {
 		}
 	});
 
+	it("normalizes an accepted legacy session-file completion to the current UUID", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-legacy-session-"));
+		try {
+			const emitted: Array<{ event: string; data: unknown }> = [];
+			const pi = { events: { on: () => () => {}, emit(event: string, data: unknown) { emitted.push({ event, data }); } } };
+			const state = createState();
+			state.currentSessionId = "session-uuid";
+			state.currentSessionFile = "/sessions/legacy.jsonl";
+			fs.writeFileSync(path.join(resultsDir, "legacy-run.json"), JSON.stringify({ id: "legacy-run", sessionId: state.currentSessionFile, success: true, summary: "done" }), "utf-8");
+			const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+			try {
+				watcher.primeExistingResults();
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			} finally {
+				watcher.stopResultWatcher();
+			}
+			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { sessionId?: string } | undefined;
+			assert.equal(completion?.sessionId, "session-uuid");
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("delivers result files only to the exact owning session when another watcher shares the same repo", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-scope-"));
 		const createPi = () => {
@@ -836,7 +859,7 @@ describe("result watcher", () => {
 		}
 	});
 
-	it("logs one unacknowledged grouped async intercom delivery before completing", async () => {
+	it("treats an unacknowledged grouped async intercom delivery as best effort", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-"));
 		try {
 			const emitted: Array<{ event: string; data: unknown }> = [];
@@ -872,9 +895,8 @@ describe("result watcher", () => {
 				watcher.primeExistingResults();
 				const deadline = Date.now() + 1000;
 				while (true) {
-					const sawWarning = logged.some((entry) => /Subagent async grouped result intercom delivery was not acknowledged/.test(String(entry[0] ?? "")));
 					const sawCompletion = emitted.some((entry) => entry.event === "subagent:async-complete");
-					if ((sawWarning && sawCompletion) || Date.now() > deadline) break;
+					if (sawCompletion || Date.now() > deadline) break;
 					await new Promise((resolve) => setTimeout(resolve, 25));
 				}
 			} finally {
@@ -884,7 +906,7 @@ describe("result watcher", () => {
 
 			assert.equal(emitted.filter((entry) => entry.event === "subagent:result-intercom").length, 1);
 			assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"), true);
-			assert.equal(logged.some((entry) => /Subagent async grouped result intercom delivery was not acknowledged/.test(String(entry[0] ?? ""))), true);
+			assert.equal(logged.some((entry) => /Subagent async grouped result intercom delivery was not acknowledged/.test(String(entry[0] ?? ""))), false);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}

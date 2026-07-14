@@ -48,6 +48,7 @@ import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedPar
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
+import type { RuntimeLaunchContext } from "../../shared/runtime-protocol.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -108,6 +109,7 @@ interface AsyncExecutionContext {
 	currentModel?: ParentModel;
 	/** Optional model-scope enforcement resolved from subagent settings. */
 	modelScope?: ModelScopeConfig;
+	runtimeLaunch?: RuntimeLaunchContext;
 }
 
 interface AsyncChainParams {
@@ -724,6 +726,9 @@ export function executeAsyncChain(
 				deadlineAt,
 				globalConcurrencyLimit: params.globalConcurrencyLimit,
 				workflowGraph,
+				runtimeLaunch: ctx.runtimeLaunch,
+				sessionIdentity: ctx.runtimeLaunch?.sessionIdentity,
+				notificationMode: ctx.runtimeLaunch?.effectiveExecution.notificationMode,
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {
 					parentRunId: nestedAddress.parentRunId,
@@ -829,6 +834,9 @@ export function executeAsyncChain(
 			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 			nestedRoute,
+			runtimeLaunch: ctx.runtimeLaunch,
+			sessionIdentity: ctx.runtimeLaunch?.sessionIdentity,
+			notificationMode: ctx.runtimeLaunch?.effectiveExecution.notificationMode,
 		});
 	}
 
@@ -918,6 +926,17 @@ export function executeAsyncSingle(
 	);
 	const effectiveThinking = params.thinkingOverride ?? agentConfig.thinking;
 	const model = applyThinkingSuffix(primaryModel, effectiveThinking, params.thinkingOverride !== undefined);
+	const effectiveRuntimeLaunch = ctx.runtimeLaunch ? {
+		...ctx.runtimeLaunch,
+		effectiveExecution: {
+			...ctx.runtimeLaunch.effectiveExecution,
+			agent,
+			model,
+			thinking: resolveEffectiveThinking(model, effectiveThinking),
+			cwd: runnerCwd,
+			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+		},
+	} : undefined;
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
@@ -986,6 +1005,9 @@ export function executeAsyncSingle(
 				controlIntercomTarget,
 				childIntercomTargets: childIntercomTarget ? [childIntercomTarget(agent, 0)] : undefined,
 				resultMode: "single",
+				runtimeLaunch: effectiveRuntimeLaunch,
+				sessionIdentity: effectiveRuntimeLaunch?.sessionIdentity,
+				notificationMode: effectiveRuntimeLaunch?.effectiveExecution.notificationMode,
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {
 					parentRunId: nestedAddress.parentRunId,
@@ -1055,6 +1077,9 @@ export function executeAsyncSingle(
 			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 			nestedRoute,
+			runtimeLaunch: effectiveRuntimeLaunch,
+			sessionIdentity: effectiveRuntimeLaunch?.sessionIdentity,
+			notificationMode: effectiveRuntimeLaunch?.effectiveExecution.notificationMode,
 		});
 	}
 

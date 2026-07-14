@@ -15,6 +15,7 @@ interface ExecutorModule {
 			signal: AbortSignal,
 			onUpdate: ((result: unknown) => void) | undefined,
 			ctx: unknown,
+			runtimeLaunch?: unknown,
 		) => Promise<{
 			isError?: boolean;
 			content: Array<{ text?: string }>;
@@ -292,6 +293,31 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(result.isError, undefined);
 		const args = readCallArgs();
 		assert.ok((args.at(-1) ?? "").startsWith("Task: \n\n## Acceptance Contract"));
+	});
+
+	it("applies a workflow runtime thinking override to the child model", async () => {
+		const { manager } = makeSessionManagerRecorder();
+		const executor = makeExecutor();
+		const runtimeLaunch = {
+			operationId: "operation-1",
+			runId: "run-1",
+			kind: "spawn",
+			sessionIdentity: { orchestratorSessionId: "session-123" },
+			provenance: { workflowId: "workflow-1", nodeId: "node-1", attemptId: "attempt-1", ownerLeaseEpoch: 1 },
+			effectiveExecution: { agent: "echo", model: "openai-codex/gpt-5.6-sol:medium", thinking: "high", cwd: tempDir, notificationMode: "event-only" },
+		};
+		const result = await executor.execute(
+			"id",
+			{ agent: "echo", task: "work", model: "openai-codex/gpt-5.6-sol:medium" },
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+			runtimeLaunch,
+		);
+
+		assert.equal(result.isError, undefined);
+		const args = readCallArgs();
+		assert.equal(args[args.indexOf("--model") + 1], "openai-codex/gpt-5.6-sol:high");
 	});
 
 	it("does not treat top-level agent as single mode when tasks are present", async () => {

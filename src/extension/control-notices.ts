@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { controlNotificationKey, formatControlNoticeMessage } from "../runs/shared/subagent-control.ts";
 import type { ControlEvent, SubagentState } from "../shared/types.ts";
+import type { NotificationMode } from "../shared/runtime-protocol.ts";
 
 export const SUBAGENT_CONTROL_MESSAGE_TYPE = "subagent_control_notice";
 
@@ -10,6 +11,7 @@ export interface SubagentControlMessageDetails {
 	asyncDir?: string;
 	childIntercomTarget?: string;
 	noticeText?: string;
+	notificationMode?: NotificationMode;
 }
 
 export function controlNoticeTarget(details: SubagentControlMessageDetails): string | undefined {
@@ -72,6 +74,7 @@ export function handleSubagentControlNotice(input: {
 	foregroundDelayMs?: number;
 }): void {
 	if (!input.details?.event || input.details.event.type === "active_long_running") return;
+	if (input.details.notificationMode === "event-only") return;
 	if (input.details.source !== "foreground") {
 		deliverControlNotice(input);
 		return;

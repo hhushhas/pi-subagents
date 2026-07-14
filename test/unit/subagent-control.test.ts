@@ -162,8 +162,8 @@ describe("subagent control attention state", () => {
 
 		assert.match(message, /Subagent needs attention: worker/);
 		assert.match(message, /Hint: Inspect status first unless the run is clearly blocked/);
-		assert.match(message, /Live async nudges interrupt the child before sending the follow-up/);
-		assert.match(message, /Nudge: subagent\(\{ action: "resume", id: "78f659a3", message: "What are you blocked on\?/);
+		assert.match(message, /non-interrupting steer/);
+		assert.match(message, /Nudge: subagent\(\{ action: "steer", id: "78f659a3", message: "What are you blocked on\?/);
 		assert.match(message, /Direct intercom target: subagent-worker-78f659a3/);
 		assert.match(message, /Status: subagent\(\{ action: "status", id: "78f659a3" \}\)/);
 		assert.match(message, /Interrupt: subagent\(\{ action: "interrupt", id: "78f659a3" \}\)/);
@@ -188,7 +188,7 @@ describe("subagent control attention state", () => {
 
 		assert.match(message, /Subagent active but long-running: worker/);
 		assert.match(message, /Inspect status/);
-		assert.match(message, /Nudge: subagent\(\{ action: "resume", id: "78f659a3", message: "What are you blocked on\?/);
+		assert.match(message, /Nudge: subagent\(\{ action: "steer", id: "78f659a3", message: "What are you blocked on\?/);
 		assert.match(message, /15 turns/);
 		assert.match(message, /160000 tokens/);
 		assert.match(message, /path src\/runs\/background\/async-status\.ts/);
@@ -221,7 +221,7 @@ describe("subagent control attention state", () => {
 		const message = formatControlIntercomMessage(event, "subagent-worker-78f659a3");
 
 		assert.match(message, /worker needs attention in run 78f659a3/);
-		assert.match(message, /Nudge: subagent\(\{ action: "resume", id: "78f659a3", message: "What are you blocked on\?/);
+		assert.match(message, /Nudge: subagent\(\{ action: "steer", id: "78f659a3", message: "What are you blocked on\?/);
 	});
 
 	it("dedupes notifications once per child target and attention state", () => {

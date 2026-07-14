@@ -8,6 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
+import type { AsyncSessionIdentity, ControlRecord, NotificationMode, RuntimeLaunchContext, TerminalRecord } from "./runtime-protocol.ts";
 
 // ============================================================================
 // Basic Types
@@ -211,7 +212,7 @@ export interface ControlEvent {
 
 export type SubagentResultStatus = "completed" | "failed" | "paused" | "detached";
 export type SubagentRunMode = "single" | "parallel" | "chain";
-export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 1;
+export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 2;
 export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
 
 export type PublicNestedStepSummary = Pick<
@@ -674,6 +675,9 @@ export interface AsyncStartedEvent {
 	deadlineAt?: number;
 	turnBudget?: TurnBudgetState;
 	nestedRoute?: NestedRouteInfo;
+	sessionIdentity?: AsyncSessionIdentity;
+	runtimeLaunch?: RuntimeLaunchContext;
+	notificationMode?: NotificationMode;
 }
 
 export interface AsyncStatus {
@@ -681,7 +685,7 @@ export interface AsyncStatus {
 	runId: string;
 	sessionId?: string;
 	mode: SubagentRunMode;
-	state: "queued" | "running" | "complete" | "failed" | "paused";
+	state: "queued" | "running" | "pausing" | "stopping" | "complete" | "failed" | "paused" | "stopped";
 	error?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
@@ -762,6 +766,11 @@ export interface AsyncStatus {
 	totalCost?: CostSummary;
 	sessionFile?: string;
 	outputs?: ChainOutputMap;
+	sessionIdentity?: AsyncSessionIdentity;
+	runtimeLaunch?: RuntimeLaunchContext;
+	notificationMode?: NotificationMode;
+	controls?: ControlRecord[];
+	terminal?: TerminalRecord;
 }
 
 export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {
@@ -771,9 +780,10 @@ export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {
 export interface AsyncJobState {
 	asyncId: string;
 	asyncDir: string;
-	status: "queued" | "running" | "complete" | "failed" | "paused";
+	status: "queued" | "running" | "pausing" | "stopping" | "complete" | "failed" | "paused" | "stopped";
 	pid?: number;
 	sessionId?: string;
+	notificationMode?: NotificationMode;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -838,6 +848,7 @@ export interface ForegroundResumeRun {
 export interface SubagentState {
 	baseCwd: string;
 	currentSessionId: string | null;
+	currentSessionFile?: string | null;
 	subagentInProgress?: boolean;
 	subagentSpawns?: { sessionId: string | null; count: number };
 	asyncJobs: Map<string, AsyncJobState>;

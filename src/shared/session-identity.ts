@@ -3,8 +3,18 @@ interface SessionIdentityManager {
 	getSessionId(): string | null | undefined;
 }
 
+export interface CurrentSessionIdentity {
+	orchestratorSessionId: string;
+	orchestratorSessionFile?: string;
+}
+
+export function resolveCurrentSessionIdentity(sessionManager: SessionIdentityManager): CurrentSessionIdentity {
+	const orchestratorSessionId = sessionManager.getSessionId();
+	if (!orchestratorSessionId) throw new Error("Current session UUID is unavailable.");
+	const orchestratorSessionFile = sessionManager.getSessionFile() ?? undefined;
+	return { orchestratorSessionId, ...(orchestratorSessionFile ? { orchestratorSessionFile } : {}) };
+}
+
 export function resolveCurrentSessionId(sessionManager: SessionIdentityManager): string {
-	const sessionId = sessionManager.getSessionFile() ?? sessionManager.getSessionId();
-	if (!sessionId) throw new Error("Current session identity is unavailable.");
-	return sessionId;
+	return resolveCurrentSessionIdentity(sessionManager).orchestratorSessionId;
 }

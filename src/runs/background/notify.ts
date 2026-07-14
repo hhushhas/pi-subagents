@@ -52,6 +52,7 @@ interface SubagentResult {
 	taskIndex?: number;
 	totalTasks?: number;
 	sessionId?: string | null;
+	notificationMode?: "default" | "event-only";
 }
 
 interface NotifyTimerApi {
@@ -100,9 +101,12 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 
 function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: SubagentNotifyDetails[]): void {
 	if (details.length === 0) return;
-	const content = details.length === 1
+	const rawContent = details.length === 1
 		? formatSingleCompletion(details[0]!)
 		: formatGroupedCompletion(details);
+	const references = details.map(formatSessionLine).filter((line): line is string => Boolean(line));
+	const referenceSuffix = references.length > 0 ? `\n\nFull result: ${references.join(" | ")}` : "";
+	const content = truncateUtf8(rawContent, 2048, referenceSuffix);
 	pi.sendMessage(
 		{
 			customType: "subagent-notify",
@@ -111,6 +115,19 @@ function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: Subagent
 		},
 		{ triggerTurn: true },
 	);
+}
+
+function truncateUtf8(value: string, maxBytes: number, requiredSuffix = ""): string {
+	if (Buffer.byteLength(value, "utf-8") <= maxBytes) return value;
+	const boundedSuffix = Buffer.byteLength(requiredSuffix, "utf8") <= 512 ? requiredSuffix : "";
+	const marker = `\n… [truncated; inspect the result artifact for full output]${boundedSuffix}`;
+	const budget = maxBytes - Buffer.byteLength(marker, "utf-8");
+	let output = "";
+	for (const char of value) {
+		if (Buffer.byteLength(output + char, "utf-8") > budget) break;
+		output += char;
+	}
+	return output + marker;
 }
 
 function completionBatchKey(result: SubagentResult): string {
@@ -193,6 +210,7 @@ export default function registerSubagentNotify(
 
 	const handleComplete = (data: unknown) => {
 		const result = data as SubagentResult;
+		if (result.notificationMode === "event-only") return;
 		if (typeof result.sessionId !== "string" || result.sessionId !== state.currentSessionId) return;
 		const now = nowFn();
 		const key = buildCompletionKey(result, "notify");

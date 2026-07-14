@@ -4,15 +4,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
+	acknowledgeSteer,
+	clearSteerReady,
 	consumeInterruptRequest,
 	consumeSteerRequests,
 	deliverInterruptRequest,
 	enqueueStepSteer,
 	interruptRequestPath,
+	isSteerReady,
+	markSteerReady,
 	requestAsyncInterrupt,
 	requestAsyncSteer,
 	steerRequestsDir,
 	stepSteerInboxDir,
+	waitForSteerAck,
 	watchAsyncControlInbox,
 } from "../../src/runs/background/control-channel.ts";
 
@@ -146,6 +151,34 @@ describe("control channel: request file", () => {
 		try {
 			assert.throws(() => requestAsyncSteer(asyncDir, { message: "   " }), /steer message must not be empty/);
 			assert.throws(() => requestAsyncSteer(asyncDir, { message: "ok", targetIndex: -1 }), /targetIndex/);
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("publishes steer readiness and records an acknowledgement", async () => {
+		const asyncDir = tmpAsyncDir("pi-control-steer-ack-");
+		try {
+			const inbox = stepSteerInboxDir(asyncDir, 0);
+			markSteerReady(inbox, 100);
+			assert.equal(isSteerReady(inbox), true);
+			acknowledgeSteer(inbox, { type: "steer", id: "control-1", ts: 100, message: "focus", targetIndex: 0 }, 200);
+			assert.equal(await waitForSteerAck(inbox, "control-1", 50), true);
+			assert.equal(await waitForSteerAck(inbox, "control-1", 10), true);
+			clearSteerReady(inbox);
+			assert.equal(isSteerReady(inbox), false);
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("reserves a steer id once and rejects conflicting replay guidance", () => {
+		const asyncDir = tmpAsyncDir("pi-control-steer-replay-");
+		try {
+			requestAsyncSteer(asyncDir, { message: "focus", targetIndex: 0, id: "control-1", ts: 100 });
+			requestAsyncSteer(asyncDir, { message: "focus", targetIndex: 0, id: "control-1", ts: 200 });
+			assert.equal(fs.readdirSync(steerRequestsDir(asyncDir)).length, 1);
+			assert.throws(() => requestAsyncSteer(asyncDir, { message: "different", targetIndex: 0, id: "control-1", ts: 300 }), /different guidance/);
 		} finally {
 			cleanup(asyncDir);
 		}

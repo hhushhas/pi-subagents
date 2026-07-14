@@ -97,6 +97,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			totalTokens: run.totalTokens,
 			sessionFile: run.sessionFile,
 			controlEventCursor: restoredControlEventCursor(run.asyncDir),
+			notificationMode: run.notificationMode,
 			nestedChildren: run.nestedChildren,
 		};
 	};
@@ -153,6 +154,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 					asyncDir: job.asyncDir,
 					childIntercomTarget: record.childIntercomTarget,
 					noticeText: record.noticeText ?? formatControlNoticeMessage(record.event, record.childIntercomTarget),
+					notificationMode: job.notificationMode,
 				};
 				if (record.channels.includes("event")) {
 					pi.events.emit(SUBAGENT_CONTROL_EVENT, payload);
@@ -364,6 +366,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			chainStepCount: info.chainStepCount,
 			parallelGroups: validParallelGroups,
 			nestedRoute: info.nestedRoute,
+			notificationMode: info.notificationMode,
 			stepsTotal: firstGroupCount ?? agents?.length,
 			hasParallelGroups: validParallelGroups.length > 0,
 			activeParallelGroup: Boolean(firstGroupCount && firstGroupCount > 0),
@@ -381,14 +384,15 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	};
 
 	const handleComplete = (data: unknown) => {
-		const result = data as { id?: string; success?: boolean; asyncDir?: string; sessionId?: string };
+		const result = data as { id?: string; success?: boolean; state?: AsyncJobState["status"]; asyncDir?: string; sessionId?: string; notificationMode?: AsyncJobState["notificationMode"] };
 		if (typeof state.currentSessionId === "string" && result.sessionId !== state.currentSessionId) return;
 		const asyncId = result.id;
 		if (!asyncId) return;
 		const job = state.asyncJobs.get(asyncId);
 		let nestedRefreshFailed = false;
 		if (job) {
-			job.status = result.success ? "complete" : "failed";
+			job.status = result.state ?? (result.success ? "complete" : "failed");
+			job.notificationMode = result.notificationMode ?? job.notificationMode;
 			job.updatedAt = Date.now();
 			if (result.asyncDir) job.asyncDir = result.asyncDir;
 			try {

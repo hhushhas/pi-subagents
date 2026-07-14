@@ -215,6 +215,27 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent, []);
 	});
 
+	it("does not inject event-only workflow completions into the parent", () => {
+		const { events, sent } = createPi("session-1");
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "workflow-1", agent: "worker", success: true, summary: "private report body",
+			timestamp: 1, sessionId: "session-1", notificationMode: "event-only",
+		});
+		assert.deepEqual(sent, []);
+	});
+
+	it("bounds the complete ordinary notification to 2 KiB of UTF-8", () => {
+		const { events, sent } = createPi("session-1");
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "large-1", agent: "worker", success: true, summary: "界".repeat(5000),
+			timestamp: 1, sessionId: "session-1", sessionFile: "/tmp/full-result.jsonl",
+		});
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.ok(Buffer.byteLength(content, "utf8") <= 2048);
+		assert.match(content, /truncated/);
+		assert.match(content, /\/tmp\/full-result\.jsonl/);
+	});
+
 	it("emits failed completions immediately even while successes are held", () => {
 		const clock = createFakeClock();
 		const { events, sent } = createBatchingPi(clock);
