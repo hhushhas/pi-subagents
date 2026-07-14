@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { acknowledgeSteer, markSteerReady, steerRequestsDir, stepSteerInboxDir, workflowControlRequestsDir } from "../../src/runs/background/control-channel.ts";
-import { publishLaunchReady } from "../../src/runs/background/launch-operations.ts";
+import { launchGoPath, publishLaunchReady } from "../../src/runs/background/launch-operations.ts";
 import { hashWorkflowCapability } from "../../src/shared/runtime-protocol.ts";
 import {
 	SUBAGENT_RPC_PROTOCOL_VERSION,
@@ -117,6 +117,36 @@ describe("subagent extension RPC bridge v2", () => {
 			assert.equal(executeCalls, 1);
 			assert.equal((first as any).data.runId, (replay as any).data.runId);
 			assert.equal((lookup as any).data.runId, (first as any).data.runId);
+			bridge.dispose();
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("waits for cold runner readiness before releasing the launch barrier", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-rpc-cold-ready-"));
+		try {
+			const events = new FakeEvents();
+			const bridge = registerSubagentRpcBridge({
+				events,
+				getContext: () => ctx(),
+				asyncDirRoot: root,
+				runtimeReadyTimeoutMs: 500,
+				execute: async (_id, _params, _signal, _update, _ctx, runtime) => {
+					assert.ok(runtime);
+					const dir = path.join(root, runtime.runId);
+					fs.mkdirSync(dir, { recursive: true });
+					setTimeout(() => {
+						fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ runId: runtime.runId, state: "queued", pid: process.pid, startedAt: Date.now(), mode: "single", cwd: runtime.effectiveExecution.cwd, sessionIdentity: runtime.sessionIdentity, runtimeLaunch: runtime }));
+						publishLaunchReady(dir, runtime.operationId, runtime.runId);
+					}, 75);
+					return { content: [{ type: "text", text: "started" }], details: { mode: "single", results: [], runId: runtime.runId, asyncId: runtime.runId, asyncDir: dir } } as any;
+				},
+			});
+			const params = { agent: "worker", task: "work", cwd: root, operationId: "cold-operation", workflowCapability: capability, provenance, notificationMode: "event-only" };
+			const reply = await request(events, "cold-spawn", "spawn", params);
+			assert.equal(reply.success, true, JSON.stringify(reply));
+			const asyncDir = (reply as any).data.asyncDir as string;
+			assert.equal(fs.existsSync(launchGoPath(asyncDir)), true);
+			assert.equal((reply as any).data.operation.state, "launched");
 			bridge.dispose();
 		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});

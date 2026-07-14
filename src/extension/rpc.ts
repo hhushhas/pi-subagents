@@ -96,6 +96,7 @@ interface RegisterSubagentRpcBridgeOptions {
 	resultsDir?: string;
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 	now?: () => number;
+	runtimeReadyTimeoutMs?: number;
 }
 
 interface WorkflowMutation {
@@ -116,7 +117,9 @@ class SubagentRpcError extends Error {
 const subagentParamsValidator = Compile(SubagentParams);
 const inFlightLaunches = new Map<string, Promise<unknown>>();
 
-async function waitForRuntimeReady(record: LaunchOperationRecord, timeoutMs = 2000): Promise<{ status: NonNullable<ReturnType<typeof readStatus>>; ready: NonNullable<ReturnType<typeof readLaunchReady>> } | undefined> {
+export const DEFAULT_WORKFLOW_RUNTIME_READY_TIMEOUT_MS = 10_000;
+
+async function waitForRuntimeReady(record: LaunchOperationRecord, timeoutMs = DEFAULT_WORKFLOW_RUNTIME_READY_TIMEOUT_MS): Promise<{ status: NonNullable<ReturnType<typeof readStatus>>; ready: NonNullable<ReturnType<typeof readLaunchReady>> } | undefined> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		const status = readStatus(record.asyncDir);
@@ -129,9 +132,14 @@ async function waitForRuntimeReady(record: LaunchOperationRecord, timeoutMs = 20
 	return status && ready && status.runId === record.runId && status.runtimeLaunch?.operationId === record.operationId && ready.runId === record.runId && ready.operationId === record.operationId ? { status, ready } : undefined;
 }
 
-function activatePreparedOperation(record: LaunchOperationRecord, options: RegisterSubagentRpcBridgeOptions): LaunchOperationRecord {
-	const status = readStatus(record.asyncDir);
-	const ready = readLaunchReady(record.asyncDir);
+async function activatePreparedOperation(record: LaunchOperationRecord, options: RegisterSubagentRpcBridgeOptions): Promise<LaunchOperationRecord> {
+	let status = readStatus(record.asyncDir);
+	let ready = readLaunchReady(record.asyncDir);
+	if (record.state === "prepared" && (!status || !ready)) {
+		const runtimeReady = await waitForRuntimeReady(record, options.runtimeReadyTimeoutMs ?? DEFAULT_WORKFLOW_RUNTIME_READY_TIMEOUT_MS);
+		status = runtimeReady?.status;
+		ready = runtimeReady?.ready;
+	}
 	if (!status || !ready || status.runId !== record.runId || status.runtimeLaunch?.operationId !== record.operationId || ready.runId !== record.runId || ready.operationId !== record.operationId) return record;
 	try { (options.kill ?? process.kill)(ready.pid, 0); }
 	catch (error) { if ((error as NodeJS.ErrnoException).code !== "EPERM") return record; }
@@ -543,7 +551,7 @@ async function launchWorkflowRun(
 	const existingPromise = inFlightLaunches.get(key);
 	if (existingPromise) return existingPromise;
 	if (!reservation.created) {
-		const activated = activatePreparedOperation(reservation.record, options);
+		const activated = await activatePreparedOperation(reservation.record, options);
 		if (activated.state === "launched") return operationData(activated);
 		if (reservation.record.state === "failed") throw new SubagentRpcError("execution_failed", reservation.record.error ?? "Launch operation failed.");
 		throw new SubagentRpcError("unknown_outcome", `Operation '${operationId}' is prepared but has no authoritative runtime status; it will not be relaunched automatically.`);
@@ -554,7 +562,7 @@ async function launchWorkflowRun(
 				? spawnParams(input)
 				: { ...stripRuntimeParams(input), action: "resume", id: requiredString(input.sourceRunId, "sourceRunId"), async: true, clarify: false } as SubagentParamsLike;
 			const result = await executeChecked(options, ctx, requestId, kind, params, reservation.record.context);
-			const runtimeReady = await waitForRuntimeReady(reservation.record);
+			const runtimeReady = await waitForRuntimeReady(reservation.record, options.runtimeReadyTimeoutMs ?? DEFAULT_WORKFLOW_RUNTIME_READY_TIMEOUT_MS);
 			if (!runtimeReady) throw new SubagentRpcError("unknown_outcome", `Operation '${operationId}' started a runner but no authoritative runtime readiness appeared; lookup is required and replay will not launch another child.`);
 			const launched = updateLaunchOperation(reservation.record, { state: "launched", pid: runtimeReady.ready.pid }, options.asyncDirRoot);
 			releaseLaunch(launched, runtimeReady.ready, options.now?.());
@@ -600,7 +608,7 @@ async function handleRequest(
 		const mutation = parseWorkflowMutation(input);
 		const capabilityHash = hashWorkflowCapability(mutation.provenance.workflowId, mutation.workflowCapability);
 		const record = readLaunchOperation({ asyncDirRoot: options.asyncDirRoot, capabilityHash, operationId: requiredString(input.operationId, "operationId") });
-		return operationData(record ? activatePreparedOperation(record, options) : undefined);
+		return operationData(record ? await activatePreparedOperation(record, options) : undefined);
 	}
 	if (request.method === "interrupt") {
 		return controlAsyncRun(request.params, options, ctx, "pause");
